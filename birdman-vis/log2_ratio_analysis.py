@@ -374,9 +374,9 @@ def calculate_log2_ratios_per_sample(biom_df: pd.DataFrame, metadata_df: pd.Data
 
 def plot_individual_comparison(results_df: pd.DataFrame, tumor_type: str, 
                               output_dir: Path, logger: logging.Logger, 
-                              figsize: Tuple[int, int] = (12, 8)) -> Optional[Path]:
+                              figsize: Tuple[int, int] = (14, 8)) -> Optional[Path]:
     """
-    Create box plot for a single tumor type comparison grouped by study ID.
+    Create box plot for a single tumor type comparison with two boxes per study (cancer vs comparator).
     
     Parameters:
     -----------
@@ -396,48 +396,88 @@ def plot_individual_comparison(results_df: pd.DataFrame, tumor_type: str,
     Optional[Path] : Path to saved plot file
     """
     try:
+        # Filter to only include cancer and the specific comparator tumor type
+        filtered_df = results_df[results_df['tumor_type'].isin(['cancer', tumor_type])]
+        
+        if filtered_df.empty:
+            logger.warning(f"No cancer or {tumor_type} samples found for comparison")
+            return None
+        
+        logger.info(f"Filtered to {len(filtered_df)} samples with tumor types: cancer, {tumor_type}")
+        
         fig, ax = plt.subplots(figsize=figsize)
         
         # Get unique study IDs and sort them
-        study_ids = sorted(results_df['qiita_study_id'].unique())
+        study_ids = sorted(filtered_df['qiita_study_id'].unique())
         
-        # Create box plot with scatter overlay grouped by study
-        positions = range(len(study_ids))
-        box_data = [results_df[results_df['qiita_study_id'] == study]['log2_ratio'].values 
-                   for study in study_ids]
+        # Prepare data for paired box plots
+        box_positions = []
+        box_data = []
+        box_labels = []
+        colors = []
         
-        bp = ax.boxplot(box_data, positions=positions, patch_artist=True,
-                       boxprops=dict(facecolor='lightblue', alpha=0.7),
-                       medianprops=dict(color='red', linewidth=2))
+        # Colors for cancer and comparator
+        cancer_color = 'lightcoral'
+        comparator_color = 'lightblue'
         
-        # Overlay scatter points colored by tumor type
-        tumor_types = results_df['tumor_type'].unique()
-        colors = plt.cm.Set1(np.linspace(0, 1, len(tumor_types)))
-        tumor_color_map = {tt: colors[i] for i, tt in enumerate(tumor_types)}
-        
-        for i, study_id in enumerate(study_ids):
-            study_data = results_df[results_df['qiita_study_id'] == study_id]
+        position = 0
+        for study_id in study_ids:
+            study_data = filtered_df[filtered_df['qiita_study_id'] == study_id]
             
-            for _, row in study_data.iterrows():
-                # Add jitter to x-coordinates
-                x_jitter = np.random.normal(i, 0.04)
-                
-                ax.scatter(x_jitter, row['log2_ratio'], 
-                          c=[tumor_color_map[row['tumor_type']]], alpha=0.6, s=30, 
-                          edgecolors='black', linewidth=0.5)
+            # Cancer samples for this study
+            cancer_data = study_data[study_data['tumor_type'] == 'cancer']['log2_ratio'].values
+            if len(cancer_data) > 0:
+                box_data.append(cancer_data)
+                box_positions.append(position)
+                box_labels.append(f'Study {study_id}\nCancer')
+                colors.append(cancer_color)
+                position += 1
+            
+            # Comparator samples for this study  
+            comparator_data = study_data[study_data['tumor_type'] == tumor_type]['log2_ratio'].values
+            if len(comparator_data) > 0:
+                box_data.append(comparator_data)
+                box_positions.append(position)
+                box_labels.append(f'Study {study_id}\n{tumor_type.title()}')
+                colors.append(comparator_color)
+                position += 1
+            
+            # Add spacing between studies
+            position += 0.5
         
-        # Create legend for tumor types
-        legend_elements = [plt.Line2D([0], [0], marker='o', color='w', 
-                                     markerfacecolor=tumor_color_map[tt], markersize=8, 
-                                     label=tt) for tt in tumor_types]
-        ax.legend(handles=legend_elements, title='Sample Tumor Type', 
+        if not box_data:
+            logger.warning(f"No valid data found for {tumor_type} comparison")
+            return None
+        
+        # Create box plots
+        bp = ax.boxplot(box_data, positions=box_positions, patch_artist=True,
+                       boxprops=dict(alpha=0.7),
+                       medianprops=dict(color='red', linewidth=2),
+                       widths=0.4)
+        
+        # Color the boxes
+        for patch, color in zip(bp['boxes'], colors):
+            patch.set_facecolor(color)
+        
+        # Overlay scatter points
+        for i, (pos, data) in enumerate(zip(box_positions, box_data)):
+            # Add jitter to x-coordinates
+            x_jitter = np.random.normal(pos, 0.04, size=len(data))
+            ax.scatter(x_jitter, data, c='black', alpha=0.6, s=20, edgecolors='white', linewidth=0.5)
+        
+        # Create custom legend showing only cancer and comparator
+        legend_elements = [
+            plt.Rectangle((0,0),1,1, facecolor=cancer_color, alpha=0.7, label='Cancer'),
+            plt.Rectangle((0,0),1,1, facecolor=comparator_color, alpha=0.7, label=tumor_type.title())
+        ]
+        ax.legend(handles=legend_elements, title='Tumor Type', 
                  bbox_to_anchor=(1.05, 1), loc='upper left')
         
         # Formatting
         ax.axhline(y=0, color='black', linestyle='--', alpha=0.5)
-        ax.set_xticks(positions)
-        ax.set_xticklabels([f'Study {sid}' for sid in study_ids], rotation=45, ha='right')
-        ax.set_xlabel('Qiita Study ID', fontweight='bold')
+        ax.set_xticks(box_positions)
+        ax.set_xticklabels(box_labels, rotation=45, ha='right', fontsize=9)
+        ax.set_xlabel('Study and Tumor Type', fontweight='bold')
         ax.set_ylabel('Log2 Ratio (Cancer Features / Other Features)', fontweight='bold')
         ax.set_title(f'Cancer vs {tumor_type.title()} Feature Abundance Ratios by Study', 
                     fontweight='bold', pad=20)
