@@ -265,16 +265,65 @@ def calculate_log2_ratios_per_sample(biom_df: pd.DataFrame, metadata_df: pd.Data
     cancer_means = biom_df.loc[available_cancer].mean(axis=0)
     other_means = biom_df.loc[available_other].mean(axis=0)
     
-    # Merge with metadata - assume first column is sample ID or use index
-    if metadata_df.index.name or len(metadata_df.index.unique()) == len(metadata_df):
-        sample_metadata = metadata_df.copy()
-    else:
-        sample_metadata = metadata_df.set_index(metadata_df.columns[0])
+    # Debug sample ID formats
+    logger.info(f"BIOM sample IDs (first 5): {list(cancer_means.index[:5])}")
+    logger.info(f"Metadata shape: {metadata_df.shape}")
+    logger.info(f"Metadata columns: {list(metadata_df.columns)}")
+    logger.info(f"Metadata index: {list(metadata_df.index[:5])}")
     
-    # Filter to samples present in both datasets
-    common_samples = cancer_means.index.intersection(sample_metadata.index)
+    # Try different approaches to match sample IDs
+    sample_metadata = None
+    common_samples = []
     
+    # Approach 1: Use first column as sample ID
+    if len(metadata_df.columns) > 0:
+        first_col_values = list(metadata_df[metadata_df.columns[0]][:5])
+        logger.info(f"First column values: {first_col_values}")
+        
+        temp_metadata = metadata_df.set_index(metadata_df.columns[0])
+        temp_common = cancer_means.index.intersection(temp_metadata.index)
+        logger.info(f"Common samples using first column: {len(temp_common)}")
+        
+        if len(temp_common) > 0:
+            sample_metadata = temp_metadata
+            common_samples = temp_common
+    
+    # Approach 2: Use index if first column didn't work
     if len(common_samples) == 0:
+        temp_common = cancer_means.index.intersection(metadata_df.index)
+        logger.info(f"Common samples using index: {len(temp_common)}")
+        
+        if len(temp_common) > 0:
+            sample_metadata = metadata_df.copy()
+            common_samples = temp_common
+    
+    # Approach 3: Try string matching (in case of slight format differences)
+    if len(common_samples) == 0:
+        logger.info("Trying string-based matching...")
+        biom_samples = set(str(s) for s in cancer_means.index)
+        
+        # Check first column
+        if len(metadata_df.columns) > 0:
+            metadata_samples = set(str(s) for s in metadata_df[metadata_df.columns[0]])
+            intersection = biom_samples.intersection(metadata_samples)
+            logger.info(f"String matching with first column: {len(intersection)} matches")
+            
+            if len(intersection) > 0:
+                # Create mapping
+                sample_metadata = metadata_df.set_index(metadata_df.columns[0])
+                common_samples = [s for s in cancer_means.index if str(s) in metadata_samples]
+        
+        # Check index  
+        if len(common_samples) == 0:
+            metadata_samples = set(str(s) for s in metadata_df.index)
+            intersection = biom_samples.intersection(metadata_samples)
+            logger.info(f"String matching with index: {len(intersection)} matches")
+            
+            if len(intersection) > 0:
+                sample_metadata = metadata_df.copy()
+                common_samples = [s for s in cancer_means.index if str(s) in metadata_samples]
+    
+    if len(common_samples) == 0 or sample_metadata is None:
         raise Log2RatioError("No common samples found between BIOM table and metadata")
     
     logger.info(f"Processing {len(common_samples)} common samples")
