@@ -337,6 +337,7 @@ def calculate_log2_ratios_per_sample(biom_df: pd.DataFrame, metadata_df: pd.Data
             continue
             
         sample_tumor_type = sample_metadata.loc[sample_id, 'tumor_type']
+        study_id = sample_metadata.loc[sample_id, 'qiita_study_id'] if 'qiita_study_id' in sample_metadata.columns else 'unknown'
         cancer_abundance = cancer_means[sample_id]
         other_abundance = other_means[sample_id]
         
@@ -351,6 +352,7 @@ def calculate_log2_ratios_per_sample(biom_df: pd.DataFrame, metadata_df: pd.Data
         results.append({
             'sample_id': sample_id,
             'tumor_type': sample_tumor_type,
+            'qiita_study_id': study_id,
             'comparison': f'cancer_vs_{tumor_type}',
             'log2_ratio': log2_ratio,
             'cancer_abundance': cancer_abundance,
@@ -372,9 +374,9 @@ def calculate_log2_ratios_per_sample(biom_df: pd.DataFrame, metadata_df: pd.Data
 
 def plot_individual_comparison(results_df: pd.DataFrame, tumor_type: str, 
                               output_dir: Path, logger: logging.Logger, 
-                              figsize: Tuple[int, int] = (10, 6)) -> Optional[Path]:
+                              figsize: Tuple[int, int] = (12, 8)) -> Optional[Path]:
     """
-    Create box plot for a single tumor type comparison split by sample tumor types.
+    Create box plot for a single tumor type comparison grouped by study ID.
     
     Parameters:
     -----------
@@ -396,38 +398,48 @@ def plot_individual_comparison(results_df: pd.DataFrame, tumor_type: str,
     try:
         fig, ax = plt.subplots(figsize=figsize)
         
-        # Get unique sample tumor types and sort them
-        sample_tumor_types = sorted(results_df['tumor_type'].unique())
+        # Get unique study IDs and sort them
+        study_ids = sorted(results_df['qiita_study_id'].unique())
         
-        # Create box plot with scatter overlay
-        positions = range(len(sample_tumor_types))
-        box_data = [results_df[results_df['tumor_type'] == tt]['log2_ratio'].values 
-                   for tt in sample_tumor_types]
+        # Create box plot with scatter overlay grouped by study
+        positions = range(len(study_ids))
+        box_data = [results_df[results_df['qiita_study_id'] == study]['log2_ratio'].values 
+                   for study in study_ids]
         
         bp = ax.boxplot(box_data, positions=positions, patch_artist=True,
                        boxprops=dict(facecolor='lightblue', alpha=0.7),
                        medianprops=dict(color='red', linewidth=2))
         
-        # Overlay scatter points
-        colors = plt.cm.Set1(np.linspace(0, 1, len(sample_tumor_types)))
+        # Overlay scatter points colored by tumor type
+        tumor_types = results_df['tumor_type'].unique()
+        colors = plt.cm.Set1(np.linspace(0, 1, len(tumor_types)))
+        tumor_color_map = {tt: colors[i] for i, tt in enumerate(tumor_types)}
         
-        for i, sample_tumor_type in enumerate(sample_tumor_types):
-            tumor_data = results_df[results_df['tumor_type'] == sample_tumor_type]['log2_ratio']
+        for i, study_id in enumerate(study_ids):
+            study_data = results_df[results_df['qiita_study_id'] == study_id]
             
-            # Add jitter to x-coordinates
-            x_jitter = np.random.normal(i, 0.04, size=len(tumor_data))
-            
-            ax.scatter(x_jitter, tumor_data.values, 
-                      c=[colors[i]], alpha=0.6, s=30, edgecolors='black', linewidth=0.5,
-                      label=sample_tumor_type)
+            for _, row in study_data.iterrows():
+                # Add jitter to x-coordinates
+                x_jitter = np.random.normal(i, 0.04)
+                
+                ax.scatter(x_jitter, row['log2_ratio'], 
+                          c=[tumor_color_map[row['tumor_type']]], alpha=0.6, s=30, 
+                          edgecolors='black', linewidth=0.5)
+        
+        # Create legend for tumor types
+        legend_elements = [plt.Line2D([0], [0], marker='o', color='w', 
+                                     markerfacecolor=tumor_color_map[tt], markersize=8, 
+                                     label=tt) for tt in tumor_types]
+        ax.legend(handles=legend_elements, title='Sample Tumor Type', 
+                 bbox_to_anchor=(1.05, 1), loc='upper left')
         
         # Formatting
         ax.axhline(y=0, color='black', linestyle='--', alpha=0.5)
         ax.set_xticks(positions)
-        ax.set_xticklabels(sample_tumor_types)
-        ax.set_xlabel('Sample Tumor Type', fontweight='bold')
+        ax.set_xticklabels([f'Study {sid}' for sid in study_ids], rotation=45, ha='right')
+        ax.set_xlabel('Qiita Study ID', fontweight='bold')
         ax.set_ylabel('Log2 Ratio (Cancer Features / Other Features)', fontweight='bold')
-        ax.set_title(f'Cancer vs {tumor_type.title()} Feature Abundance Ratios', 
+        ax.set_title(f'Cancer vs {tumor_type.title()} Feature Abundance Ratios by Study', 
                     fontweight='bold', pad=20)
         ax.grid(True, alpha=0.3)
         
@@ -450,9 +462,9 @@ def plot_individual_comparison(results_df: pd.DataFrame, tumor_type: str,
 
 def plot_combined_comparison(all_results: Dict[str, pd.DataFrame], 
                            output_dir: Path, logger: logging.Logger,
-                           figsize: Tuple[int, int] = (14, 8)) -> Optional[Path]:
+                           figsize: Tuple[int, int] = (16, 10)) -> Optional[Path]:
     """
-    Create combined bar plot showing mean log2 ratios across all comparisons.
+    Create combined bar plot showing mean log2 ratios across all comparisons grouped by study.
     
     Parameters:
     -----------
@@ -472,52 +484,60 @@ def plot_combined_comparison(all_results: Dict[str, pd.DataFrame],
     try:
         fig, ax = plt.subplots(figsize=figsize)
         
-        # Prepare data for combined plot
+        # Prepare data for combined plot grouped by study
         plot_data = []
         
         for comparison_type, results_df in all_results.items():
-            # Calculate mean log2 ratio by sample tumor type
-            means = results_df.groupby('tumor_type')['log2_ratio'].mean()
-            stds = results_df.groupby('tumor_type')['log2_ratio'].std()
+            # Calculate mean log2 ratio by study ID
+            means = results_df.groupby('qiita_study_id')['log2_ratio'].mean()
+            stds = results_df.groupby('qiita_study_id')['log2_ratio'].std()
             
-            for sample_tumor_type, mean_ratio in means.items():
+            for study_id, mean_ratio in means.items():
                 plot_data.append({
                     'comparison': f'cancer_vs_{comparison_type}',
-                    'sample_tumor_type': sample_tumor_type,
+                    'qiita_study_id': study_id,
                     'mean_log2_ratio': mean_ratio,
-                    'std_log2_ratio': stds[sample_tumor_type]
+                    'std_log2_ratio': stds[study_id] if not pd.isna(stds[study_id]) else 0
                 })
         
         plot_df = pd.DataFrame(plot_data)
         
         # Create grouped bar plot
-        comparisons = plot_df['comparison'].unique()
-        sample_types = plot_df['sample_tumor_type'].unique()
+        comparisons = sorted(plot_df['comparison'].unique())
+        study_ids = sorted(plot_df['qiita_study_id'].unique())
         
-        x = np.arange(len(comparisons))
-        width = 0.8 / len(sample_types)
+        x = np.arange(len(study_ids))
+        width = 0.8 / len(comparisons)
         
-        for i, sample_type in enumerate(sample_types):
-            data = plot_df[plot_df['sample_tumor_type'] == sample_type]
-            means = [data[data['comparison'] == comp]['mean_log2_ratio'].iloc[0] 
-                    if len(data[data['comparison'] == comp]) > 0 else 0 
-                    for comp in comparisons]
-            stds = [data[data['comparison'] == comp]['std_log2_ratio'].iloc[0] 
-                   if len(data[data['comparison'] == comp]) > 0 else 0 
-                   for comp in comparisons]
+        colors = plt.cm.Set1(np.linspace(0, 1, len(comparisons)))
+        
+        for i, comparison in enumerate(comparisons):
+            data = plot_df[plot_df['comparison'] == comparison]
+            means = []
+            stds = []
+            
+            for study_id in study_ids:
+                study_data = data[data['qiita_study_id'] == study_id]
+                if len(study_data) > 0:
+                    means.append(study_data['mean_log2_ratio'].iloc[0])
+                    stds.append(study_data['std_log2_ratio'].iloc[0])
+                else:
+                    means.append(0)
+                    stds.append(0)
             
             ax.bar(x + i * width, means, width, yerr=stds, 
-                  label=sample_type, alpha=0.8, capsize=5)
+                  label=comparison.replace('cancer_vs_', '').replace('_', ' ').title(), 
+                  alpha=0.8, capsize=3, color=colors[i])
         
         # Formatting
         ax.axhline(y=0, color='black', linestyle='--', alpha=0.5)
-        ax.set_xlabel('Comparison Type', fontweight='bold')
+        ax.set_xlabel('Qiita Study ID', fontweight='bold')
         ax.set_ylabel('Mean Log2 Ratio (Cancer / Other)', fontweight='bold')
-        ax.set_title('Combined Analysis: Cancer vs Other Tumor Types', 
+        ax.set_title('Combined Analysis: Cancer vs Other Tumor Types by Study', 
                     fontweight='bold', pad=20)
-        ax.set_xticks(x + width * (len(sample_types) - 1) / 2)
-        ax.set_xticklabels([comp.replace('_', ' ').title() for comp in comparisons])
-        ax.legend(title='Sample Tumor Type', bbox_to_anchor=(1.05, 1), loc='upper left')
+        ax.set_xticks(x + width * (len(comparisons) - 1) / 2)
+        ax.set_xticklabels([f'Study {sid}' for sid in study_ids], rotation=45, ha='right')
+        ax.legend(title='Comparison Type', bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(True, alpha=0.3)
         
         plt.tight_layout()
@@ -622,13 +642,18 @@ def run_log2_ratio_analysis(beta_var_path: Path, metadata_path: Path, biom_path:
                 if individual_plot:
                     generated_plots.append(individual_plot)
                 
-                # Save summary statistics
+                # Save summary statistics by study ID
                 summary_path = output_dir / f"log2_ratio_summary_cancer_vs_{tumor_type}.tsv"
-                summary_stats = results_df.groupby('tumor_type')['log2_ratio'].agg([
+                summary_stats = results_df.groupby('qiita_study_id')['log2_ratio'].agg([
                     'count', 'mean', 'std', 'min', 'median', 'max'
                 ]).round(4)
                 summary_stats.to_csv(summary_path, sep='\t')
                 logger.info(f"Summary statistics saved: {summary_path}")
+                
+                # Log the specific features used
+                logger.info(f"Features used for {tumor_type} comparison:")
+                logger.info(f"  Cancer-enriched features: {cancer_features}")
+                logger.info(f"  {tumor_type.title()}-enriched features: {other_features}")
                 
             except Exception as e:
                 logger.error(f"Failed to process {tumor_type} comparison: {e}")
