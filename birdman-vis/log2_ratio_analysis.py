@@ -414,7 +414,7 @@ def plot_individual_comparison(results_df: pd.DataFrame, tumor_type: str,
         cancer_color = 'lightcoral'
         comparator_color = 'lightblue'
         
-        # Prepare data for grouped box plots using seaborn-style approach
+        # Prepare data for grouped box plots
         plot_data = []
         for study_id in study_ids:
             study_data = filtered_df[filtered_df['qiita_study_id'] == study_id]
@@ -462,54 +462,71 @@ def plot_individual_comparison(results_df: pd.DataFrame, tumor_type: str,
         # Filter plot data to only include studies with both types
         plot_df = plot_df[plot_df['study_id'].isin(studies_with_both)]
         
-        # Set up positions for side-by-side box plots
-        x_positions = np.arange(len(studies_with_both))
-        width = 0.35
+        # FIXED: Better positioning for side-by-side box plots
+        n_studies = len(studies_with_both)
+        x_base = np.arange(n_studies)
+        box_width = 0.35
         
-        # Collect data for each study
-        cancer_box_data = []
-        cancer_box_positions = []
-        comparator_box_data = []
-        comparator_box_positions = []
+        # Collect data for matplotlib boxplot (expects list of arrays)
+        cancer_data_list = []
+        comparator_data_list = []
         
-        for i, study_id in enumerate(studies_with_both):
+        for study_id in studies_with_both:
             study_data = plot_df[plot_df['study_id'] == study_id]
             
             # Cancer data
-            cancer_data = study_data[study_data['tumor_type'] == 'Cancer']['log2_ratio'].values
-            cancer_box_data.append(cancer_data)
-            cancer_box_positions.append(x_positions[i] - width/2)
+            cancer_values = study_data[study_data['tumor_type'] == 'Cancer']['log2_ratio'].values
+            cancer_data_list.append(cancer_values)
             
             # Comparator data  
-            comparator_data = study_data[study_data['tumor_type'] == tumor_type.title()]['log2_ratio'].values
-            comparator_box_data.append(comparator_data)
-            comparator_box_positions.append(x_positions[i] + width/2)
+            comparator_values = study_data[study_data['tumor_type'] == tumor_type.title()]['log2_ratio'].values
+            comparator_data_list.append(comparator_values)
         
-        # Create box plots for cancer (left side)
-        bp1 = ax.boxplot(cancer_box_data, positions=cancer_box_positions,
-                        patch_artist=True, widths=width*0.8,
+        # Create side-by-side box plots with correct positioning
+        cancer_positions = x_base - box_width/2
+        comparator_positions = x_base + box_width/2
+        
+        # Plot cancer boxes (left side)
+        bp1 = ax.boxplot(cancer_data_list, 
+                        positions=cancer_positions,
+                        patch_artist=True, 
+                        widths=box_width*0.7,
                         boxprops=dict(facecolor=cancer_color, alpha=0.7),
-                        medianprops=dict(color='red', linewidth=2))
+                        medianprops=dict(color='red', linewidth=2),
+                        whiskerprops=dict(color='black'),
+                        capprops=dict(color='black'),
+                        flierprops=dict(marker='o', markerfacecolor='black', alpha=0.3))
         
-        # Create box plots for comparator (right side)
-        bp2 = ax.boxplot(comparator_box_data, positions=comparator_box_positions,
-                        patch_artist=True, widths=width*0.8,
+        # Plot comparator boxes (right side)
+        bp2 = ax.boxplot(comparator_data_list, 
+                        positions=comparator_positions,
+                        patch_artist=True, 
+                        widths=box_width*0.7,
                         boxprops=dict(facecolor=comparator_color, alpha=0.7),
-                        medianprops=dict(color='red', linewidth=2))
+                        medianprops=dict(color='red', linewidth=2),
+                        whiskerprops=dict(color='black'),
+                        capprops=dict(color='black'),
+                        flierprops=dict(marker='o', markerfacecolor='black', alpha=0.3))
         
-        # Add scatter points
+        # Add scatter points with better jitter
         for i, study_id in enumerate(studies_with_both):
             study_data = plot_df[plot_df['study_id'] == study_id]
             
             # Cancer points (left side)
             cancer_points = study_data[study_data['tumor_type'] == 'Cancer']['log2_ratio'].values
-            x_jitter = np.random.normal(cancer_box_positions[i], 0.02, size=len(cancer_points))
-            ax.scatter(x_jitter, cancer_points, c='black', alpha=0.6, s=20, edgecolors='white', linewidth=0.5)
+            if len(cancer_points) > 0:
+                jitter_width = box_width * 0.1
+                x_jitter = np.random.normal(cancer_positions[i], jitter_width, size=len(cancer_points))
+                ax.scatter(x_jitter, cancer_points, c='darkred', alpha=0.8, s=25, 
+                          edgecolors='white', linewidth=0.5, zorder=10)
             
             # Comparator points (right side)
             comparator_points = study_data[study_data['tumor_type'] == tumor_type.title()]['log2_ratio'].values
-            x_jitter = np.random.normal(comparator_box_positions[i], 0.02, size=len(comparator_points))
-            ax.scatter(x_jitter, comparator_points, c='black', alpha=0.6, s=20, edgecolors='white', linewidth=0.5)
+            if len(comparator_points) > 0:
+                jitter_width = box_width * 0.1
+                x_jitter = np.random.normal(comparator_positions[i], jitter_width, size=len(comparator_points))
+                ax.scatter(x_jitter, comparator_points, c='darkblue', alpha=0.8, s=25, 
+                          edgecolors='white', linewidth=0.5, zorder=10)
         
         # Create custom legend
         legend_elements = [
@@ -521,7 +538,7 @@ def plot_individual_comparison(results_df: pd.DataFrame, tumor_type: str,
         
         # Formatting
         ax.axhline(y=0, color='black', linestyle='--', alpha=0.5)
-        ax.set_xticks(x_positions)
+        ax.set_xticks(x_base)
         ax.set_xticklabels([f'Study {sid}' for sid in studies_with_both], fontsize=10)
         
         ax.set_xlabel('Study ID', fontweight='bold')
@@ -530,6 +547,7 @@ def plot_individual_comparison(results_df: pd.DataFrame, tumor_type: str,
                     fontweight='bold', pad=20)
         ax.grid(True, alpha=0.3, axis='y')
         
+        # Improve layout
         plt.tight_layout()
         
         # Save plot
@@ -545,7 +563,6 @@ def plot_individual_comparison(results_df: pd.DataFrame, tumor_type: str,
         if 'fig' in locals():
             plt.close(fig)
         return None
-
 
 def plot_combined_comparison(all_results: Dict[str, pd.DataFrame], 
                            output_dir: Path, logger: logging.Logger,
