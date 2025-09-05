@@ -375,191 +375,97 @@ def calculate_log2_ratios_per_sample(biom_df: pd.DataFrame, metadata_df: pd.Data
 def plot_individual_comparison(results_df: pd.DataFrame, tumor_type: str, 
                               output_dir: Path, logger: logging.Logger, 
                               figsize: Tuple[int, int] = (14, 8)) -> Optional[Path]:
-    """
-    Create box plot for a single tumor type comparison with two boxes per study (cancer vs comparator).
-    
-    Parameters:
-    -----------
-    results_df : pd.DataFrame
-        DataFrame with log2 ratios per sample
-    tumor_type : str
-        The tumor type being compared (e.g., 'adjacent')
-    output_dir : Path
-        Output directory for plot
-    logger : logging.Logger
-        Logger instance
-    figsize : Tuple[int, int]
-        Figure size
-        
-    Returns:
-    --------
-    Optional[Path] : Path to saved plot file
-    """
+    """Create side-by-side box plots for cancer vs comparator by study."""
     try:
-        # Filter to only include cancer and the specific comparator tumor type
+        # Filter to cancer and comparator samples only
         filtered_df = results_df[results_df['tumor_type'].isin(['cancer', tumor_type])]
-        
         if filtered_df.empty:
-            logger.warning(f"No cancer or {tumor_type} samples found for comparison")
+            logger.warning(f"No cancer or {tumor_type} samples found")
             return None
         
-        logger.info(f"Filtered to {len(filtered_df)} samples with tumor types: cancer, {tumor_type}")
-        
-        fig, ax = plt.subplots(figsize=figsize)
-        
-        # Get unique study IDs and sort them
-        study_ids = sorted(filtered_df['qiita_study_id'].unique())
-        
-        # Colors for cancer and comparator
-        cancer_color = 'lightcoral'
-        comparator_color = 'lightblue'
-        
-        # Prepare data for grouped box plots
-        plot_data = []
-        for study_id in study_ids:
-            study_data = filtered_df[filtered_df['qiita_study_id'] == study_id]
-            
-            # Add cancer data
-            cancer_samples = study_data[study_data['tumor_type'] == 'cancer']
-            for _, row in cancer_samples.iterrows():
-                plot_data.append({
-                    'study_id': study_id,
-                    'tumor_type': 'Cancer',
-                    'log2_ratio': row['log2_ratio']
-                })
-            
-            # Add comparator data
-            comparator_samples = study_data[study_data['tumor_type'] == tumor_type]
-            for _, row in comparator_samples.iterrows():
-                plot_data.append({
-                    'study_id': study_id,
-                    'tumor_type': tumor_type.title(),
-                    'log2_ratio': row['log2_ratio']
-                })
-        
-        if not plot_data:
-            logger.warning(f"No valid data found for {tumor_type} comparison")
-            return None
-        
-        plot_df = pd.DataFrame(plot_data)
-        
-        # Filter to only include studies that have BOTH cancer and comparator data
+        # Find studies with both cancer and comparator samples
         studies_with_both = []
-        for study_id in sorted(plot_df['study_id'].unique()):
-            study_data = plot_df[plot_df['study_id'] == study_id]
-            has_cancer = len(study_data[study_data['tumor_type'] == 'Cancer']) > 0
-            has_comparator = len(study_data[study_data['tumor_type'] == tumor_type.title()]) > 0
-            
-            if has_cancer and has_comparator:
+        for study_id in filtered_df['qiita_study_id'].unique():
+            study_data = filtered_df[filtered_df['qiita_study_id'] == study_id]
+            tumor_types_in_study = set(study_data['tumor_type'])
+            if 'cancer' in tumor_types_in_study and tumor_type in tumor_types_in_study:
                 studies_with_both.append(study_id)
         
         if not studies_with_both:
             logger.warning(f"No studies have both cancer and {tumor_type} samples")
             return None
             
-        logger.info(f"Including {len(studies_with_both)} studies with both cancer and {tumor_type} samples: {studies_with_both}")
+        logger.info(f"Using {len(studies_with_both)} studies: {studies_with_both}")
         
-        # Filter plot data to only include studies with both types
-        plot_df = plot_df[plot_df['study_id'].isin(studies_with_both)]
+        # Prepare plot data
+        fig, ax = plt.subplots(figsize=figsize)
         
-        # FIXED: Better positioning for side-by-side box plots
-        n_studies = len(studies_with_both)
-        x_base = np.arange(n_studies)
-        box_width = 0.35
+        # Use seaborn-style grouped box plot
+        plot_data = filtered_df[filtered_df['qiita_study_id'].isin(studies_with_both)].copy()
+        plot_data['tumor_type'] = plot_data['tumor_type'].str.title()
         
-        # Collect data for matplotlib boxplot (expects list of arrays)
-        cancer_data_list = []
-        comparator_data_list = []
+        # Create grouped box plot using pandas groupby
+        studies = sorted(studies_with_both)
+        x_pos = np.arange(len(studies))
+        width = 0.35
         
-        for study_id in studies_with_both:
-            study_data = plot_df[plot_df['study_id'] == study_id]
+        cancer_data = []
+        comparator_data = []
+        
+        for study in studies:
+            study_data = plot_data[plot_data['qiita_study_id'] == study]
+            cancer_vals = study_data[study_data['tumor_type'] == 'Cancer']['log2_ratio'].values
+            comp_vals = study_data[study_data['tumor_type'] == tumor_type.title()]['log2_ratio'].values
+            cancer_data.append(cancer_vals)
+            comparator_data.append(comp_vals)
+        
+        # Plot boxes side by side
+        bp1 = ax.boxplot(cancer_data, positions=x_pos - width/2, widths=width*0.8, 
+                        patch_artist=True, boxprops=dict(facecolor='lightcoral', alpha=0.7))
+        bp2 = ax.boxplot(comparator_data, positions=x_pos + width/2, widths=width*0.8,
+                        patch_artist=True, boxprops=dict(facecolor='lightblue', alpha=0.7))
+        
+        # Add scatter points
+        for i, study in enumerate(studies):
+            study_data = plot_data[plot_data['qiita_study_id'] == study]
             
-            # Cancer data
-            cancer_values = study_data[study_data['tumor_type'] == 'Cancer']['log2_ratio'].values
-            cancer_data_list.append(cancer_values)
+            cancer_vals = study_data[study_data['tumor_type'] == 'Cancer']['log2_ratio'].values
+            comp_vals = study_data[study_data['tumor_type'] == tumor_type.title()]['log2_ratio'].values
             
-            # Comparator data  
-            comparator_values = study_data[study_data['tumor_type'] == tumor_type.title()]['log2_ratio'].values
-            comparator_data_list.append(comparator_values)
-        
-        # Create side-by-side box plots with correct positioning
-        cancer_positions = x_base - box_width/2
-        comparator_positions = x_base + box_width/2
-        
-        # Plot cancer boxes (left side)
-        bp1 = ax.boxplot(cancer_data_list, 
-                        positions=cancer_positions,
-                        patch_artist=True, 
-                        widths=box_width*0.7,
-                        boxprops=dict(facecolor=cancer_color, alpha=0.7),
-                        medianprops=dict(color='red', linewidth=2),
-                        whiskerprops=dict(color='black'),
-                        capprops=dict(color='black'),
-                        flierprops=dict(marker='o', markerfacecolor='black', alpha=0.3))
-        
-        # Plot comparator boxes (right side)
-        bp2 = ax.boxplot(comparator_data_list, 
-                        positions=comparator_positions,
-                        patch_artist=True, 
-                        widths=box_width*0.7,
-                        boxprops=dict(facecolor=comparator_color, alpha=0.7),
-                        medianprops=dict(color='red', linewidth=2),
-                        whiskerprops=dict(color='black'),
-                        capprops=dict(color='black'),
-                        flierprops=dict(marker='o', markerfacecolor='black', alpha=0.3))
-        
-        # Add scatter points with better jitter
-        for i, study_id in enumerate(studies_with_both):
-            study_data = plot_df[plot_df['study_id'] == study_id]
-            
-            # Cancer points (left side)
-            cancer_points = study_data[study_data['tumor_type'] == 'Cancer']['log2_ratio'].values
-            if len(cancer_points) > 0:
-                jitter_width = box_width * 0.1
-                x_jitter = np.random.normal(cancer_positions[i], jitter_width, size=len(cancer_points))
-                ax.scatter(x_jitter, cancer_points, c='darkred', alpha=0.8, s=25, 
-                          edgecolors='white', linewidth=0.5, zorder=10)
-            
-            # Comparator points (right side)
-            comparator_points = study_data[study_data['tumor_type'] == tumor_type.title()]['log2_ratio'].values
-            if len(comparator_points) > 0:
-                jitter_width = box_width * 0.1
-                x_jitter = np.random.normal(comparator_positions[i], jitter_width, size=len(comparator_points))
-                ax.scatter(x_jitter, comparator_points, c='darkblue', alpha=0.8, s=25, 
-                          edgecolors='white', linewidth=0.5, zorder=10)
-        
-        # Create custom legend
-        legend_elements = [
-            plt.Rectangle((0,0),1,1, facecolor=cancer_color, alpha=0.7, label='Cancer'),
-            plt.Rectangle((0,0),1,1, facecolor=comparator_color, alpha=0.7, label=tumor_type.title())
-        ]
-        ax.legend(handles=legend_elements, title='Tumor Type', 
-                 bbox_to_anchor=(1.05, 1), loc='upper left')
+            if len(cancer_vals) > 0:
+                ax.scatter(np.random.normal(x_pos[i] - width/2, 0.02, len(cancer_vals)), 
+                          cancer_vals, c='darkred', alpha=0.7, s=20)
+            if len(comp_vals) > 0:
+                ax.scatter(np.random.normal(x_pos[i] + width/2, 0.02, len(comp_vals)), 
+                          comp_vals, c='darkblue', alpha=0.7, s=20)
         
         # Formatting
-        ax.axhline(y=0, color='black', linestyle='--', alpha=0.5)
-        ax.set_xticks(x_base)
-        ax.set_xticklabels([f'Study {sid}' for sid in studies_with_both], fontsize=10)
-        
+        ax.axhline(0, color='black', linestyle='--', alpha=0.5)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels([f'Study {s}' for s in studies])
         ax.set_xlabel('Study ID', fontweight='bold')
-        ax.set_ylabel('Log2 Ratio (Cancer Features / Other Features)', fontweight='bold')
-        ax.set_title(f'Cancer vs {tumor_type.title()} Feature Abundance Ratios by Study', 
-                    fontweight='bold', pad=20)
-        ax.grid(True, alpha=0.3, axis='y')
+        ax.set_ylabel('Log2 Ratio (Cancer / Other)', fontweight='bold')
+        ax.set_title(f'Cancer vs {tumor_type.title()} by Study', fontweight='bold')
         
-        # Improve layout
+        # Legend
+        legend_elements = [
+            plt.Rectangle((0,0),1,1, facecolor='lightcoral', alpha=0.7, label='Cancer'),
+            plt.Rectangle((0,0),1,1, facecolor='lightblue', alpha=0.7, label=tumor_type.title())
+        ]
+        ax.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc='upper left')
+        
         plt.tight_layout()
         
-        # Save plot
+        # Save
         output_path = output_dir / f"log2_ratio_cancer_vs_{tumor_type}.svg"
-        fig.savefig(output_path, bbox_inches="tight", pad_inches=0.3, format='svg')
+        fig.savefig(output_path, bbox_inches="tight", format='svg')
         plt.close()
         
-        logger.info(f"Individual comparison plot saved: {output_path}")
+        logger.info(f"Plot saved: {output_path}")
         return output_path
         
     except Exception as e:
-        logger.error(f"Error creating individual comparison plot: {e}")
+        logger.error(f"Error creating plot: {e}")
         if 'fig' in locals():
             plt.close(fig)
         return None
