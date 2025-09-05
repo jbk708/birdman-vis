@@ -26,6 +26,8 @@ from plots import (
     plot_upset_analysis,
 )
 
+from log2_ratio_analysis import run_log2_ratio_analysis
+
 
 class PlotConfig:
     """Configuration for plot generation."""
@@ -134,6 +136,21 @@ def parse_arguments() -> argparse.Namespace:
     
     plot_group.add_argument("--include-significant", action="store_true",
                            help="Include significant-only versions of all plots")
+    
+    # Log2 ratio analysis options
+    log2_group = parser.add_argument_group("Log2 ratio analysis")
+    log2_group.add_argument("--log2-ratio", action="store_true",
+                           help="Run log2 ratio analysis")
+    log2_group.add_argument("--beta-var", type=Path,
+                           help="BIRDMAn beta_var.tsv file for log2 analysis")
+    log2_group.add_argument("--metadata", type=Path,
+                           help="Metadata.tsv file for log2 analysis")
+    log2_group.add_argument("--biom-table", type=Path,
+                           help="BIOM table file for log2 analysis")
+    log2_group.add_argument("--log2-top-n", type=int, default=10,
+                           help="Number of top positive/negative features for log2 analysis")
+    log2_group.add_argument("--log2-figsize", nargs=2, type=int, default=[14, 8],
+                           metavar=("W", "H"), help="Log2 ratio figure size")
 
     return parser.parse_args()
 
@@ -240,6 +257,19 @@ def main():
             result = generate_plot(config, df_processed, args.output_dir, logger)
             if result:
                 generated_files.append(result)
+        
+        # Run log2 ratio analysis if requested
+        if args.log2_ratio:
+            if not all([args.beta_var, args.metadata, args.biom_table]):
+                logger.error("Log2 ratio analysis requires --beta-var, --metadata, and --biom-table arguments")
+            else:
+                logger.info("Running log2 ratio analysis")
+                log2_success = run_log2_ratio_analysis(
+                    args.beta_var, args.metadata, args.biom_table, args.output_dir,
+                    args.log2_top_n, tuple(args.log2_figsize)
+                )
+                if log2_success:
+                    generated_files.append(args.output_dir / "log2_ratio_analysis.svg")
         
         logger.info(f"Pipeline completed. Generated {len(generated_files)} visualizations:")
         for file_path in generated_files:
