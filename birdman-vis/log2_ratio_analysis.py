@@ -128,7 +128,8 @@ def validate_inputs(beta_var_path: Path, metadata_path: Path, biom_path: Path,
     return beta_var_df, metadata_df, biom_df
 
 
-def get_top_features_by_tumor_effect(beta_var_df: pd.DataFrame, n_features: int = 10) -> Tuple[List[str], List[str]]:
+def get_top_features_by_tumor_effect(beta_var_df: pd.DataFrame, n_features: int = 10, 
+                                    logger: logging.Logger = None) -> Tuple[List[str], List[str]]:
     """
     Extract top positive and negative features based on tumor_type effects.
     
@@ -147,16 +148,39 @@ def get_top_features_by_tumor_effect(beta_var_df: pd.DataFrame, n_features: int 
     tumor_cols = [col for col in beta_var_df.columns if 'tumor_type' in col and not col.endswith('_var')]
     
     if not tumor_cols:
-        raise Log2RatioError("No tumor_type effect columns found in beta_var data")
+        # Debug: show what columns are available
+        available_cols = [col for col in beta_var_df.columns if 'tumor' in col.lower()]
+        raise Log2RatioError(f"No tumor_type effect columns found in beta_var data. Available tumor-related columns: {available_cols}")
     
-    # Calculate mean effect across all tumor types for each feature
-    mean_effects = beta_var_df[tumor_cols].mean(axis=1)
+    if logger:
+        logger.info(f"Found {len(tumor_cols)} tumor_type columns: {tumor_cols[:3]}...")
+    
+    # Ensure numeric data only
+    try:
+        numeric_data = beta_var_df[tumor_cols].apply(pd.to_numeric, errors='coerce')
+        # Drop rows with any NaN values (non-numeric entries)
+        numeric_data = numeric_data.dropna()
+        
+        if numeric_data.empty:
+            raise Log2RatioError("No numeric data found in tumor_type columns")
+        
+        # Calculate mean effect across all tumor types for each feature
+        mean_effects = numeric_data.mean(axis=1)
+        
+    except Exception as e:
+        raise Log2RatioError(f"Error processing tumor_type columns: {e}")
     
     # Get top positive effects
-    positive_features = mean_effects[mean_effects > 0].nlargest(n_features).index.tolist()
+    positive_effects = mean_effects[mean_effects > 0]
+    if len(positive_effects) == 0:
+        raise Log2RatioError("No positive tumor effects found")
+    positive_features = positive_effects.nlargest(min(n_features, len(positive_effects))).index.tolist()
     
     # Get top negative effects (most negative)
-    negative_features = mean_effects[mean_effects < 0].nsmallest(n_features).index.tolist()
+    negative_effects = mean_effects[mean_effects < 0]
+    if len(negative_effects) == 0:
+        raise Log2RatioError("No negative tumor effects found")
+    negative_features = negative_effects.nsmallest(min(n_features, len(negative_effects))).index.tolist()
     
     return positive_features, negative_features
 
@@ -377,7 +401,7 @@ def run_log2_ratio_analysis(beta_var_path: Path, metadata_path: Path, biom_path:
         
         # Get top features
         positive_features, negative_features = get_top_features_by_tumor_effect(
-            beta_var_df, n_features
+            beta_var_df, n_features, logger
         )
         
         logger.info(f"Top {len(positive_features)} positive features: {[simplify_feature_name(f, 30) for f in positive_features[:3]]}...")
