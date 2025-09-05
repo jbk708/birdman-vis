@@ -410,40 +410,53 @@ def plot_individual_comparison(results_df: pd.DataFrame, tumor_type: str,
         # Get unique study IDs and sort them
         study_ids = sorted(filtered_df['qiita_study_id'].unique())
         
-        # Prepare data for paired box plots
+        # Prepare data for paired box plots (side-by-side)
         box_positions = []
         box_data = []
         box_labels = []
         colors = []
+        study_labels = []
         
         # Colors for cancer and comparator
         cancer_color = 'lightcoral'
         comparator_color = 'lightblue'
         
-        position = 0
-        for study_id in study_ids:
+        base_position = 0
+        box_width = 0.4
+        spacing_between_pairs = 0.2
+        spacing_between_studies = 1.0
+        
+        for i, study_id in enumerate(study_ids):
             study_data = filtered_df[filtered_df['qiita_study_id'] == study_id]
+            
+            # Calculate positions for this study (side-by-side)
+            cancer_pos = base_position - box_width/2
+            comparator_pos = base_position + box_width/2
+            
+            study_has_data = False
             
             # Cancer samples for this study
             cancer_data = study_data[study_data['tumor_type'] == 'cancer']['log2_ratio'].values
             if len(cancer_data) > 0:
                 box_data.append(cancer_data)
-                box_positions.append(position)
-                box_labels.append(f'Study {study_id}\nCancer')
+                box_positions.append(cancer_pos)
                 colors.append(cancer_color)
-                position += 1
+                study_has_data = True
             
             # Comparator samples for this study  
             comparator_data = study_data[study_data['tumor_type'] == tumor_type]['log2_ratio'].values
             if len(comparator_data) > 0:
                 box_data.append(comparator_data)
-                box_positions.append(position)
-                box_labels.append(f'Study {study_id}\n{tumor_type.title()}')
+                box_positions.append(comparator_pos)
                 colors.append(comparator_color)
-                position += 1
+                study_has_data = True
             
-            # Add spacing between studies
-            position += 0.5
+            # Only add study label if we have data
+            if study_has_data:
+                study_labels.append((base_position, f'Study {study_id}'))
+            
+            # Move to next study position
+            base_position += spacing_between_studies
         
         if not box_data:
             logger.warning(f"No valid data found for {tumor_type} comparison")
@@ -453,16 +466,16 @@ def plot_individual_comparison(results_df: pd.DataFrame, tumor_type: str,
         bp = ax.boxplot(box_data, positions=box_positions, patch_artist=True,
                        boxprops=dict(alpha=0.7),
                        medianprops=dict(color='red', linewidth=2),
-                       widths=0.4)
+                       widths=box_width)
         
         # Color the boxes
         for patch, color in zip(bp['boxes'], colors):
             patch.set_facecolor(color)
         
-        # Overlay scatter points
+        # Overlay scatter points (one point per sample)
         for i, (pos, data) in enumerate(zip(box_positions, box_data)):
-            # Add jitter to x-coordinates
-            x_jitter = np.random.normal(pos, 0.04, size=len(data))
+            # Add small jitter to x-coordinates for visibility
+            x_jitter = np.random.normal(pos, 0.02, size=len(data))
             ax.scatter(x_jitter, data, c='black', alpha=0.6, s=20, edgecolors='white', linewidth=0.5)
         
         # Create custom legend showing only cancer and comparator
@@ -475,13 +488,18 @@ def plot_individual_comparison(results_df: pd.DataFrame, tumor_type: str,
         
         # Formatting
         ax.axhline(y=0, color='black', linestyle='--', alpha=0.5)
-        ax.set_xticks(box_positions)
-        ax.set_xticklabels(box_labels, rotation=45, ha='right', fontsize=9)
-        ax.set_xlabel('Study and Tumor Type', fontweight='bold')
+        
+        # Set x-axis labels to show study IDs at center of each pair
+        study_positions = [pos for pos, label in study_labels]
+        study_names = [label for pos, label in study_labels]
+        ax.set_xticks(study_positions)
+        ax.set_xticklabels(study_names, fontsize=10)
+        
+        ax.set_xlabel('Study ID', fontweight='bold')
         ax.set_ylabel('Log2 Ratio (Cancer Features / Other Features)', fontweight='bold')
         ax.set_title(f'Cancer vs {tumor_type.title()} Feature Abundance Ratios by Study', 
                     fontweight='bold', pad=20)
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, alpha=0.3, axis='y')
         
         plt.tight_layout()
         
