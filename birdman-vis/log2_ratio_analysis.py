@@ -443,55 +443,73 @@ def plot_individual_comparison(results_df: pd.DataFrame, tumor_type: str,
         
         plot_df = pd.DataFrame(plot_data)
         
-        # Create grouped box plot manually
-        study_ids_with_data = sorted(plot_df['study_id'].unique())
-        tumor_types = ['Cancer', tumor_type.title()]
+        # Filter to only include studies that have BOTH cancer and comparator data
+        studies_with_both = []
+        for study_id in sorted(plot_df['study_id'].unique()):
+            study_data = plot_df[plot_df['study_id'] == study_id]
+            has_cancer = len(study_data[study_data['tumor_type'] == 'Cancer']) > 0
+            has_comparator = len(study_data[study_data['tumor_type'] == tumor_type.title()]) > 0
+            
+            if has_cancer and has_comparator:
+                studies_with_both.append(study_id)
         
-        x_positions = np.arange(len(study_ids_with_data))
+        if not studies_with_both:
+            logger.warning(f"No studies have both cancer and {tumor_type} samples")
+            return None
+            
+        logger.info(f"Including {len(studies_with_both)} studies with both cancer and {tumor_type} samples: {studies_with_both}")
+        
+        # Filter plot data to only include studies with both types
+        plot_df = plot_df[plot_df['study_id'].isin(studies_with_both)]
+        
+        # Set up positions for side-by-side box plots
+        x_positions = np.arange(len(studies_with_both))
         width = 0.35
         
-        # Prepare box plot data
-        cancer_data_by_study = []
-        comparator_data_by_study = []
+        # Collect data for each study
+        cancer_box_data = []
+        cancer_box_positions = []
+        comparator_box_data = []
+        comparator_box_positions = []
         
-        for study_id in study_ids_with_data:
-            study_cancer = plot_df[(plot_df['study_id'] == study_id) & (plot_df['tumor_type'] == 'Cancer')]['log2_ratio'].values
-            study_comparator = plot_df[(plot_df['study_id'] == study_id) & (plot_df['tumor_type'] == tumor_type.title())]['log2_ratio'].values
+        for i, study_id in enumerate(studies_with_both):
+            study_data = plot_df[plot_df['study_id'] == study_id]
             
-            cancer_data_by_study.append(study_cancer if len(study_cancer) > 0 else [])
-            comparator_data_by_study.append(study_comparator if len(study_comparator) > 0 else [])
+            # Cancer data
+            cancer_data = study_data[study_data['tumor_type'] == 'Cancer']['log2_ratio'].values
+            cancer_box_data.append(cancer_data)
+            cancer_box_positions.append(x_positions[i] - width/2)
+            
+            # Comparator data  
+            comparator_data = study_data[study_data['tumor_type'] == tumor_type.title()]['log2_ratio'].values
+            comparator_box_data.append(comparator_data)
+            comparator_box_positions.append(x_positions[i] + width/2)
         
         # Create box plots for cancer (left side)
-        cancer_positions = x_positions - width/2
-        bp1 = ax.boxplot([data for data in cancer_data_by_study if len(data) > 0], 
-                        positions=[pos for i, pos in enumerate(cancer_positions) if len(cancer_data_by_study[i]) > 0],
+        bp1 = ax.boxplot(cancer_box_data, positions=cancer_box_positions,
                         patch_artist=True, widths=width*0.8,
                         boxprops=dict(facecolor=cancer_color, alpha=0.7),
                         medianprops=dict(color='red', linewidth=2))
         
         # Create box plots for comparator (right side)
-        comparator_positions = x_positions + width/2
-        bp2 = ax.boxplot([data for data in comparator_data_by_study if len(data) > 0],
-                        positions=[pos for i, pos in enumerate(comparator_positions) if len(comparator_data_by_study[i]) > 0],
+        bp2 = ax.boxplot(comparator_box_data, positions=comparator_box_positions,
                         patch_artist=True, widths=width*0.8,
                         boxprops=dict(facecolor=comparator_color, alpha=0.7),
                         medianprops=dict(color='red', linewidth=2))
         
         # Add scatter points
-        for i, study_id in enumerate(study_ids_with_data):
+        for i, study_id in enumerate(studies_with_both):
             study_data = plot_df[plot_df['study_id'] == study_id]
             
-            # Cancer points
+            # Cancer points (left side)
             cancer_points = study_data[study_data['tumor_type'] == 'Cancer']['log2_ratio'].values
-            if len(cancer_points) > 0:
-                x_jitter = np.random.normal(cancer_positions[i], 0.02, size=len(cancer_points))
-                ax.scatter(x_jitter, cancer_points, c='black', alpha=0.6, s=20, edgecolors='white', linewidth=0.5)
+            x_jitter = np.random.normal(cancer_box_positions[i], 0.02, size=len(cancer_points))
+            ax.scatter(x_jitter, cancer_points, c='black', alpha=0.6, s=20, edgecolors='white', linewidth=0.5)
             
-            # Comparator points
+            # Comparator points (right side)
             comparator_points = study_data[study_data['tumor_type'] == tumor_type.title()]['log2_ratio'].values
-            if len(comparator_points) > 0:
-                x_jitter = np.random.normal(comparator_positions[i], 0.02, size=len(comparator_points))
-                ax.scatter(x_jitter, comparator_points, c='black', alpha=0.6, s=20, edgecolors='white', linewidth=0.5)
+            x_jitter = np.random.normal(comparator_box_positions[i], 0.02, size=len(comparator_points))
+            ax.scatter(x_jitter, comparator_points, c='black', alpha=0.6, s=20, edgecolors='white', linewidth=0.5)
         
         # Create custom legend
         legend_elements = [
@@ -504,7 +522,7 @@ def plot_individual_comparison(results_df: pd.DataFrame, tumor_type: str,
         # Formatting
         ax.axhline(y=0, color='black', linestyle='--', alpha=0.5)
         ax.set_xticks(x_positions)
-        ax.set_xticklabels([f'Study {sid}' for sid in study_ids_with_data], fontsize=10)
+        ax.set_xticklabels([f'Study {sid}' for sid in studies_with_both], fontsize=10)
         
         ax.set_xlabel('Study ID', fontweight='bold')
         ax.set_ylabel('Log2 Ratio (Cancer Features / Other Features)', fontweight='bold')
