@@ -128,68 +128,102 @@ def validate_inputs(beta_var_path: Path, metadata_path: Path, biom_path: Path,
     return beta_var_df, metadata_df, biom_df
 
 
-def get_top_features_by_tumor_effect(beta_var_df: pd.DataFrame, n_features: int = 10, 
-                                    logger: logging.Logger = None) -> Tuple[List[str], List[str]]:
+def extract_tumor_types_from_columns(beta_var_df: pd.DataFrame, 
+                                    logger: logging.Logger = None) -> Dict[str, str]:
     """
-    Extract top positive and negative features based on tumor_type effects.
+    Extract tumor types from BIRDMAn column names.
     
     Parameters:
     -----------
     beta_var_df : pd.DataFrame
         BIRDMAn beta_var output
-    n_features : int
-        Number of top features to select
+    logger : logging.Logger
+        Logger instance
         
     Returns:
     --------
-    Tuple[List[str], List[str]] : Lists of top positive and negative feature names
+    Dict[str, str] : Mapping of tumor_type -> column_name
     """
-    # Find tumor_type effect columns
-    tumor_cols = [col for col in beta_var_df.columns if 'tumor_type' in col and not col.endswith('_var')]
+    import re
     
-    if not tumor_cols:
-        # Debug: show what columns are available
-        available_cols = [col for col in beta_var_df.columns if 'tumor' in col.lower()]
-        raise Log2RatioError(f"No tumor_type effect columns found in beta_var data. Available tumor-related columns: {available_cols}")
+    # Pattern to match: C(tumor_type, Treatment('cancer'))[T.TUMOR_TYPE]_mean
+    pattern = r"C\(tumor_type,\s*Treatment\('([^']+)'\)\)\[T\.([^\]]+)\]_mean"
+    
+    tumor_type_cols = {}
+    
+    for col in beta_var_df.columns:
+        match = re.match(pattern, col)
+        if match:
+            reference_level = match.group(1)  # Should be 'cancer'
+            tumor_type = match.group(2)       # e.g., 'adjacent', 'healthy'
+            tumor_type_cols[tumor_type] = col
     
     if logger:
-        logger.info(f"Found {len(tumor_cols)} tumor_type columns: {tumor_cols[:3]}...")
+        logger.info(f"Found tumor type columns: {list(tumor_type_cols.keys())}")
+        logger.info(f"Reference level appears to be: {reference_level if 'reference_level' in locals() else 'cancer'}")
     
-    # Ensure numeric data only
-    try:
-        numeric_data = beta_var_df[tumor_cols].apply(pd.to_numeric, errors='coerce')
-        # Drop rows with any NaN values (non-numeric entries)
-        numeric_data = numeric_data.dropna()
+    return tumor_type_cols
+
+
+def get_top_features_by_tumor_effect(beta_var_df: pd.DataFrame, tumor_type_cols: Dict[str, str],
+                                    n_features: int = 10, logger: logging.Logger = None) -> Dict[str, Tuple[List[str], List[str]]]:
+    """
+    Extract top positive and negative features for each tumor type comparison.
+    
+    Parameters:
+    -----------
+    beta_var_df : pd.DataFrame
+        BIRDMAn beta_var output
+    tumor_type_cols : Dict[str, str]
+        Mapping of tumor_type -> column_name
+    n_features : int
+        Number of top features to select per comparison
+    logger : logging.Logger
+        Logger instance
         
-        if numeric_data.empty:
-            raise Log2RatioError("No numeric data found in tumor_type columns")
+    Returns:
+    --------
+    Dict[str, Tuple[List[str], List[str]]] : For each tumor type, (positive_features, negative_features)
+    """
+    results = {}
+    
+    for tumor_type, col_name in tumor_type_cols.items():
+        if logger:
+            logger.info(f"Processing {tumor_type} vs cancer comparison...")
         
-        # Calculate mean effect across all tumor types for each feature
-        mean_effects = numeric_data.mean(axis=1)
-        
-    except Exception as e:
-        raise Log2RatioError(f"Error processing tumor_type columns: {e}")
+        try:
+            # Get effect sizes (cancer is reference, so positive = higher in cancer)
+            effects = pd.to_numeric(beta_var_df[col_name], errors='coerce').dropna()
+            
+            if effects.empty:
+                logger.warning(f"No numeric data for {tumor_type} comparison")
+                continue
+            
+            # Get top features where cancer > tumor_type (positive effects)
+            positive_effects = effects[effects > 0]
+            positive_features = positive_effects.nlargest(min(n_features, len(positive_effects))).index.tolist()
+            
+            # Get top features where tumor_type > cancer (negative effects)  
+            negative_effects = effects[effects < 0]
+            negative_features = negative_effects.nsmallest(min(n_features, len(negative_effects))).index.tolist()
+            
+            results[tumor_type] = (positive_features, negative_features)
+            
+            if logger:
+                logger.info(f"  Found {len(positive_features)} cancer-enriched, {len(negative_features)} {tumor_type}-enriched features")
+                
+        except Exception as e:
+            logger.error(f"Error processing {tumor_type}: {e}")
+            continue
     
-    # Get top positive effects
-    positive_effects = mean_effects[mean_effects > 0]
-    if len(positive_effects) == 0:
-        raise Log2RatioError("No positive tumor effects found")
-    positive_features = positive_effects.nlargest(min(n_features, len(positive_effects))).index.tolist()
-    
-    # Get top negative effects (most negative)
-    negative_effects = mean_effects[mean_effects < 0]
-    if len(negative_effects) == 0:
-        raise Log2RatioError("No negative tumor effects found")
-    negative_features = negative_effects.nsmallest(min(n_features, len(negative_effects))).index.tolist()
-    
-    return positive_features, negative_features
+    return results
 
 
 def calculate_log2_ratios_per_sample(biom_df: pd.DataFrame, metadata_df: pd.DataFrame,
-                                   positive_features: List[str], negative_features: List[str],
-                                   logger: logging.Logger) -> Tuple[pd.DataFrame, List[str]]:
+                                   tumor_type: str, cancer_features: List[str], 
+                                   other_features: List[str], logger: logging.Logger) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Calculate log2 ratios for each sample based on tumor type.
+    Calculate log2 ratios for each sample for a specific tumor type comparison.
     
     Parameters:
     -----------
@@ -197,10 +231,12 @@ def calculate_log2_ratios_per_sample(biom_df: pd.DataFrame, metadata_df: pd.Data
         Feature abundance table
     metadata_df : pd.DataFrame
         Sample metadata
-    positive_features : List[str]
-        Top positive effect features
-    negative_features : List[str]
-        Top negative effect features
+    tumor_type : str
+        The tumor type being compared to cancer (e.g., 'adjacent', 'healthy')
+    cancer_features : List[str]
+        Features enriched in cancer samples
+    other_features : List[str]
+        Features enriched in the other tumor type
     logger : logging.Logger
         Logger instance
         
@@ -209,31 +245,34 @@ def calculate_log2_ratios_per_sample(biom_df: pd.DataFrame, metadata_df: pd.Data
     Tuple[pd.DataFrame, List[str]] : DataFrame with log2 ratios and list of excluded studies
     """
     # Ensure features exist in biom table
-    available_positive = [f for f in positive_features if f in biom_df.index]
-    available_negative = [f for f in negative_features if f in biom_df.index]
+    available_cancer = [f for f in cancer_features if f in biom_df.index]
+    available_other = [f for f in other_features if f in biom_df.index]
     
-    if len(available_positive) < len(positive_features):
-        missing = set(positive_features) - set(available_positive)
-        logger.warning(f"Missing positive features in BIOM table: {missing}")
+    if len(available_cancer) < len(cancer_features):
+        missing = set(cancer_features) - set(available_cancer)
+        logger.warning(f"Missing cancer-enriched features in BIOM table: {missing}")
     
-    if len(available_negative) < len(negative_features):
-        missing = set(negative_features) - set(available_negative)
-        logger.warning(f"Missing negative features in BIOM table: {missing}")
+    if len(available_other) < len(other_features):
+        missing = set(other_features) - set(available_other)
+        logger.warning(f"Missing {tumor_type}-enriched features in BIOM table: {missing}")
     
-    if not available_positive or not available_negative:
+    if not available_cancer or not available_other:
         raise Log2RatioError("Insufficient features available in BIOM table")
     
-    logger.info(f"Using {len(available_positive)} positive and {len(available_negative)} negative features")
+    logger.info(f"Using {len(available_cancer)} cancer-enriched and {len(available_other)} {tumor_type}-enriched features")
     
     # Calculate mean abundances per sample
-    positive_means = biom_df.loc[available_positive].mean(axis=0)
-    negative_means = biom_df.loc[available_negative].mean(axis=0)
+    cancer_means = biom_df.loc[available_cancer].mean(axis=0)
+    other_means = biom_df.loc[available_other].mean(axis=0)
     
-    # Merge with metadata
-    sample_metadata = metadata_df.set_index(metadata_df.columns[0])  # Assume first column is sample ID
+    # Merge with metadata - assume first column is sample ID or use index
+    if metadata_df.index.name or len(metadata_df.index.unique()) == len(metadata_df):
+        sample_metadata = metadata_df.copy()
+    else:
+        sample_metadata = metadata_df.set_index(metadata_df.columns[0])
     
     # Filter to samples present in both datasets
-    common_samples = positive_means.index.intersection(sample_metadata.index)
+    common_samples = cancer_means.index.intersection(sample_metadata.index)
     
     if len(common_samples) == 0:
         raise Log2RatioError("No common samples found between BIOM table and metadata")
@@ -248,24 +287,25 @@ def calculate_log2_ratios_per_sample(biom_df: pd.DataFrame, metadata_df: pd.Data
         if sample_id not in sample_metadata.index:
             continue
             
-        tumor_type = sample_metadata.loc[sample_id, 'tumor_type']
-        pos_abundance = positive_means[sample_id]
-        neg_abundance = negative_means[sample_id]
+        sample_tumor_type = sample_metadata.loc[sample_id, 'tumor_type']
+        cancer_abundance = cancer_means[sample_id]
+        other_abundance = other_means[sample_id]
         
         # Check for zero denominators
-        if neg_abundance == 0 or np.isnan(neg_abundance):
-            excluded_studies.append(f"{sample_id} (tumor_type: {tumor_type})")
+        if other_abundance == 0 or np.isnan(other_abundance):
+            excluded_studies.append(f"{sample_id} (tumor_type: {sample_tumor_type})")
             continue
             
-        # Calculate log2 ratio (negative in numerator as requested)
-        log2_ratio = np.log2(neg_abundance / pos_abundance)
+        # Calculate log2 ratio: log2(cancer_abundance / other_abundance)
+        log2_ratio = np.log2(cancer_abundance / other_abundance)
         
         results.append({
             'sample_id': sample_id,
-            'tumor_type': tumor_type,
+            'tumor_type': sample_tumor_type,
+            'comparison': f'cancer_vs_{tumor_type}',
             'log2_ratio': log2_ratio,
-            'positive_abundance': pos_abundance,
-            'negative_abundance': neg_abundance
+            'cancer_abundance': cancer_abundance,
+            'other_abundance': other_abundance
         })
     
     if excluded_studies:
@@ -276,20 +316,23 @@ def calculate_log2_ratios_per_sample(biom_df: pd.DataFrame, metadata_df: pd.Data
     if results_df.empty:
         raise Log2RatioError("No valid samples for log2 ratio calculation")
     
-    logger.info(f"Calculated log2 ratios for {len(results_df)} samples across {results_df['tumor_type'].nunique()} tumor types")
+    logger.info(f"Calculated log2 ratios for {len(results_df)} samples comparing cancer vs {tumor_type}")
     
     return results_df, excluded_studies
 
 
-def plot_log2_ratios(results_df: pd.DataFrame, output_dir: Path, 
-                    logger: logging.Logger, figsize: Tuple[int, int] = (14, 8)) -> Optional[Path]:
+def plot_individual_comparison(results_df: pd.DataFrame, tumor_type: str, 
+                              output_dir: Path, logger: logging.Logger, 
+                              figsize: Tuple[int, int] = (10, 6)) -> Optional[Path]:
     """
-    Create box and whisker plot with scatter overlay for log2 ratios.
+    Create box plot for a single tumor type comparison split by sample tumor types.
     
     Parameters:
     -----------
     results_df : pd.DataFrame
         DataFrame with log2 ratios per sample
+    tumor_type : str
+        The tumor type being compared (e.g., 'adjacent')
     output_dir : Path
         Output directory for plot
     logger : logging.Logger
@@ -304,60 +347,142 @@ def plot_log2_ratios(results_df: pd.DataFrame, output_dir: Path,
     try:
         fig, ax = plt.subplots(figsize=figsize)
         
-        # Get unique tumor types and sort them
-        tumor_types = sorted(results_df['tumor_type'].unique())
+        # Get unique sample tumor types and sort them
+        sample_tumor_types = sorted(results_df['tumor_type'].unique())
         
-        # Create box plot
-        box_data = [results_df[results_df['tumor_type'] == tt]['log2_ratio'].values for tt in tumor_types]
+        # Create box plot with scatter overlay
+        positions = range(len(sample_tumor_types))
+        box_data = [results_df[results_df['tumor_type'] == tt]['log2_ratio'].values 
+                   for tt in sample_tumor_types]
         
-        bp = ax.boxplot(box_data, labels=tumor_types, patch_artist=True, 
+        bp = ax.boxplot(box_data, positions=positions, patch_artist=True,
                        boxprops=dict(facecolor='lightblue', alpha=0.7),
                        medianprops=dict(color='red', linewidth=2))
         
         # Overlay scatter points
-        colors = plt.cm.Set1(np.linspace(0, 1, len(tumor_types)))
+        colors = plt.cm.Set1(np.linspace(0, 1, len(sample_tumor_types)))
         
-        for i, tumor_type in enumerate(tumor_types):
-            tumor_data = results_df[results_df['tumor_type'] == tumor_type]['log2_ratio']
+        for i, sample_tumor_type in enumerate(sample_tumor_types):
+            tumor_data = results_df[results_df['tumor_type'] == sample_tumor_type]['log2_ratio']
             
-            # Add some jitter to x-coordinates for better visibility
-            x_jitter = np.random.normal(i + 1, 0.04, size=len(tumor_data))
+            # Add jitter to x-coordinates
+            x_jitter = np.random.normal(i, 0.04, size=len(tumor_data))
             
             ax.scatter(x_jitter, tumor_data.values, 
-                      c=[colors[i]], alpha=0.6, s=30, edgecolors='black', linewidth=0.5)
+                      c=[colors[i]], alpha=0.6, s=30, edgecolors='black', linewidth=0.5,
+                      label=sample_tumor_type)
         
         # Formatting
         ax.axhline(y=0, color='black', linestyle='--', alpha=0.5)
-        ax.set_xlabel('Tumor Type', fontweight='bold')
-        ax.set_ylabel('Log2 Ratio (Negative Features / Positive Features)', fontweight='bold')
-        ax.set_title('Log2 Ratios of Top Tumor Effect Features by Sample', fontweight='bold', pad=20)
+        ax.set_xticks(positions)
+        ax.set_xticklabels(sample_tumor_types)
+        ax.set_xlabel('Sample Tumor Type', fontweight='bold')
+        ax.set_ylabel('Log2 Ratio (Cancer Features / Other Features)', fontweight='bold')
+        ax.set_title(f'Cancer vs {tumor_type.title()} Feature Abundance Ratios', 
+                    fontweight='bold', pad=20)
         ax.grid(True, alpha=0.3)
-        
-        # Rotate x-axis labels if many tumor types
-        if len(tumor_types) > 8:
-            plt.xticks(rotation=45, ha='right')
         
         plt.tight_layout()
         
         # Save plot
-        output_path = output_dir / "log2_ratio_analysis.svg"
+        output_path = output_dir / f"log2_ratio_cancer_vs_{tumor_type}.svg"
         fig.savefig(output_path, bbox_inches="tight", pad_inches=0.3, format='svg')
         plt.close()
         
-        logger.info(f"Log2 ratio plot saved: {output_path}")
-        
-        # Save summary statistics
-        summary_path = output_dir / "log2_ratio_summary.tsv"
-        summary_stats = results_df.groupby('tumor_type')['log2_ratio'].agg([
-            'count', 'mean', 'std', 'min', 'median', 'max'
-        ]).round(4)
-        summary_stats.to_csv(summary_path, sep='\t')
-        logger.info(f"Summary statistics saved: {summary_path}")
-        
+        logger.info(f"Individual comparison plot saved: {output_path}")
         return output_path
         
     except Exception as e:
-        logger.error(f"Error creating log2 ratio plot: {e}")
+        logger.error(f"Error creating individual comparison plot: {e}")
+        if 'fig' in locals():
+            plt.close(fig)
+        return None
+
+
+def plot_combined_comparison(all_results: Dict[str, pd.DataFrame], 
+                           output_dir: Path, logger: logging.Logger,
+                           figsize: Tuple[int, int] = (14, 8)) -> Optional[Path]:
+    """
+    Create combined bar plot showing mean log2 ratios across all comparisons.
+    
+    Parameters:
+    -----------
+    all_results : Dict[str, pd.DataFrame]
+        Dictionary mapping tumor_type -> results DataFrame
+    output_dir : Path
+        Output directory for plot
+    logger : logging.Logger
+        Logger instance
+    figsize : Tuple[int, int]
+        Figure size
+        
+    Returns:
+    --------
+    Optional[Path] : Path to saved plot file
+    """
+    try:
+        fig, ax = plt.subplots(figsize=figsize)
+        
+        # Prepare data for combined plot
+        plot_data = []
+        
+        for comparison_type, results_df in all_results.items():
+            # Calculate mean log2 ratio by sample tumor type
+            means = results_df.groupby('tumor_type')['log2_ratio'].mean()
+            stds = results_df.groupby('tumor_type')['log2_ratio'].std()
+            
+            for sample_tumor_type, mean_ratio in means.items():
+                plot_data.append({
+                    'comparison': f'cancer_vs_{comparison_type}',
+                    'sample_tumor_type': sample_tumor_type,
+                    'mean_log2_ratio': mean_ratio,
+                    'std_log2_ratio': stds[sample_tumor_type]
+                })
+        
+        plot_df = pd.DataFrame(plot_data)
+        
+        # Create grouped bar plot
+        comparisons = plot_df['comparison'].unique()
+        sample_types = plot_df['sample_tumor_type'].unique()
+        
+        x = np.arange(len(comparisons))
+        width = 0.8 / len(sample_types)
+        
+        for i, sample_type in enumerate(sample_types):
+            data = plot_df[plot_df['sample_tumor_type'] == sample_type]
+            means = [data[data['comparison'] == comp]['mean_log2_ratio'].iloc[0] 
+                    if len(data[data['comparison'] == comp]) > 0 else 0 
+                    for comp in comparisons]
+            stds = [data[data['comparison'] == comp]['std_log2_ratio'].iloc[0] 
+                   if len(data[data['comparison'] == comp]) > 0 else 0 
+                   for comp in comparisons]
+            
+            ax.bar(x + i * width, means, width, yerr=stds, 
+                  label=sample_type, alpha=0.8, capsize=5)
+        
+        # Formatting
+        ax.axhline(y=0, color='black', linestyle='--', alpha=0.5)
+        ax.set_xlabel('Comparison Type', fontweight='bold')
+        ax.set_ylabel('Mean Log2 Ratio (Cancer / Other)', fontweight='bold')
+        ax.set_title('Combined Analysis: Cancer vs Other Tumor Types', 
+                    fontweight='bold', pad=20)
+        ax.set_xticks(x + width * (len(sample_types) - 1) / 2)
+        ax.set_xticklabels([comp.replace('_', ' ').title() for comp in comparisons])
+        ax.legend(title='Sample Tumor Type', bbox_to_anchor=(1.05, 1), loc='upper left')
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        # Save plot
+        output_path = output_dir / "log2_ratio_combined_analysis.svg"
+        fig.savefig(output_path, bbox_inches="tight", pad_inches=0.3, format='svg')
+        plt.close()
+        
+        logger.info(f"Combined comparison plot saved: {output_path}")
+        return output_path
+        
+    except Exception as e:
+        logger.error(f"Error creating combined comparison plot: {e}")
         if 'fig' in locals():
             plt.close(fig)
         return None
@@ -367,7 +492,7 @@ def run_log2_ratio_analysis(beta_var_path: Path, metadata_path: Path, biom_path:
                            output_dir: Path, n_features: int = 10, 
                            figsize: Tuple[int, int] = (14, 8)) -> bool:
     """
-    Run complete log2 ratio analysis pipeline.
+    Run complete log2 ratio analysis pipeline with individual and combined plots.
     
     Parameters:
     -----------
@@ -380,9 +505,9 @@ def run_log2_ratio_analysis(beta_var_path: Path, metadata_path: Path, biom_path:
     output_dir : Path
         Output directory
     n_features : int
-        Number of top features to use
+        Number of top features to use per comparison
     figsize : Tuple[int, int]
-        Figure size for plot
+        Figure size for plots
         
     Returns:
     --------
@@ -399,32 +524,82 @@ def run_log2_ratio_analysis(beta_var_path: Path, metadata_path: Path, biom_path:
             beta_var_path, metadata_path, biom_path, logger
         )
         
-        # Get top features
-        positive_features, negative_features = get_top_features_by_tumor_effect(
-            beta_var_df, n_features, logger
+        # Extract tumor types from column names
+        tumor_type_cols = extract_tumor_types_from_columns(beta_var_df, logger)
+        
+        if not tumor_type_cols:
+            logger.error("No tumor type columns found in beta_var file")
+            return False
+        
+        # Get top features for each comparison
+        all_features = get_top_features_by_tumor_effect(
+            beta_var_df, tumor_type_cols, n_features, logger
         )
         
-        logger.info(f"Top {len(positive_features)} positive features: {[simplify_feature_name(f, 30) for f in positive_features[:3]]}...")
-        logger.info(f"Top {len(negative_features)} negative features: {[simplify_feature_name(f, 30) for f in negative_features[:3]]}...")
+        if not all_features:
+            logger.error("No valid tumor type comparisons found")
+            return False
         
-        # Calculate log2 ratios
-        results_df, excluded_studies = calculate_log2_ratios_per_sample(
-            biom_df, metadata_df, positive_features, negative_features, logger
-        )
+        # Process each tumor type comparison
+        all_results = {}
+        generated_plots = []
         
-        # Save detailed results
-        results_path = output_dir / "log2_ratio_results.tsv"
-        results_df.to_csv(results_path, sep='\t', index=False)
-        logger.info(f"Detailed results saved: {results_path}")
+        for tumor_type, (cancer_features, other_features) in all_features.items():
+            logger.info(f"Processing {tumor_type} comparison...")
+            logger.info(f"  Cancer-enriched features: {[simplify_feature_name(f, 30) for f in cancer_features[:3]]}...")
+            logger.info(f"  {tumor_type.title()}-enriched features: {[simplify_feature_name(f, 30) for f in other_features[:3]]}...")
+            
+            try:
+                # Calculate log2 ratios for this comparison
+                results_df, excluded_studies = calculate_log2_ratios_per_sample(
+                    biom_df, metadata_df, tumor_type, cancer_features, other_features, logger
+                )
+                
+                if results_df.empty:
+                    logger.warning(f"No valid samples for {tumor_type} comparison")
+                    continue
+                
+                all_results[tumor_type] = results_df
+                
+                # Save detailed results
+                results_path = output_dir / f"log2_ratio_results_cancer_vs_{tumor_type}.tsv"
+                results_df.to_csv(results_path, sep='\t', index=False)
+                logger.info(f"Detailed results saved: {results_path}")
+                
+                # Create individual plot
+                individual_plot = plot_individual_comparison(
+                    results_df, tumor_type, output_dir, logger, figsize
+                )
+                if individual_plot:
+                    generated_plots.append(individual_plot)
+                
+                # Save summary statistics
+                summary_path = output_dir / f"log2_ratio_summary_cancer_vs_{tumor_type}.tsv"
+                summary_stats = results_df.groupby('tumor_type')['log2_ratio'].agg([
+                    'count', 'mean', 'std', 'min', 'median', 'max'
+                ]).round(4)
+                summary_stats.to_csv(summary_path, sep='\t')
+                logger.info(f"Summary statistics saved: {summary_path}")
+                
+            except Exception as e:
+                logger.error(f"Failed to process {tumor_type} comparison: {e}")
+                continue
         
-        # Create visualization
-        plot_path = plot_log2_ratios(results_df, output_dir, logger, figsize)
+        # Create combined plot if multiple comparisons
+        if len(all_results) > 1:
+            combined_plot = plot_combined_comparison(
+                all_results, output_dir, logger, figsize
+            )
+            if combined_plot:
+                generated_plots.append(combined_plot)
         
-        if plot_path:
-            logger.info("Log2 ratio analysis completed successfully")
+        if generated_plots:
+            logger.info(f"Log2 ratio analysis completed successfully. Generated {len(generated_plots)} plots:")
+            for plot_path in generated_plots:
+                logger.info(f"  - {plot_path}")
             return True
         else:
-            logger.error("Plot generation failed")
+            logger.error("No plots were generated")
             return False
             
     except Exception as e:
